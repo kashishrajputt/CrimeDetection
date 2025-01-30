@@ -1,93 +1,117 @@
-import streamlit as st
-import geopy.distance
 import pandas as pd
+import streamlit as st
+import geocoder  # For getting the user's current location
+from sklearn.tree import DecisionTreeClassifier
 import folium
-from streamlit_folium import st_folium
-from geopy.geocoders import Nominatim
+from folium.plugins import HeatMap
 import joblib
 
-# Load the dataset (replace with your actual dataset)
-@st.cache_resource
-def load_model():
-    return joblib.load('crime_zone_model.pkl')
+# Load the dataset and preprocess
+df = pd.read_csv('crime_data_delhi_with_coordinates.csv')
 
-model = load_model()
+# Sum up the relevant crime columns to get the total crime score
+crime_columns = [
+    'Crime on Streets', 'Street Theft', 'Molestation on Roads',
+    'Harassment Cases', 'Eve Teasing', 'Kidnapping & Abduction of Women',
+    'Acid Attack', 'Attempt to Acid Attack', 'Murder with Rape/Gang Rape'
+]
+df['Total_Crime'] = df[crime_columns].sum(axis=1)
 
-# Define zone classification based on crime count
-def classify_zone(crime_count):
-    if crime_count >= 400:  # Threshold for "Red"
-        return "Red"
-    elif crime_count >= 200:  # Threshold for "Yellow"
-        return "Yellow"
+# Define the thresholds for the zones based on crime data
+red_zone_threshold = df['Total_Crime'].quantile(0.66)  # Top 33% (Red)
+green_zone_threshold = df['Total_Crime'].quantile(0.33)  # Bottom 33% (Green)
+
+# Create a new column 'Zone' based on crime thresholds
+def categorize_zone(row):
+    if row['Total_Crime'] >= red_zone_threshold:
+        return 'Red'      # Red Zone: Top 33%
+    elif row['Total_Crime'] <= green_zone_threshold:
+        return 'Green'    # Green Zone: Bottom 33%
     else:
-        return "Green"
+        return 'Yellow'   # Yellow Zone: Middle 34%
 
-# Get user's current geolocation
-@st.cache_data
-def get_user_location():
-    try:
-        # Automatically detect location using device IP
-        from geocoder import ip
-        user_location = ip("me").latlng  # [latitude, longitude]
-        if not user_location:
-            st.error("Unable to fetch location. Please check your connection or permissions.")
-            return None
-        return user_location
-    except Exception as e:
-        st.error(f"Error fetching location: {e}")
-        return None
+# Apply the categorization function to the dataframe
+df['Zone'] = df.apply(categorize_zone, axis=1)
 
-# Load data
-zone_data = load_model()
+# Train a Decision Tree Classifier
+X = df[['Total_Crime']]
+y = df['Zone']
+model = DecisionTreeClassifier(random_state=42)
+model.fit(X, y)
 
-# Add a "Zone" column based on crime classification
-zone_data["Zone"] = zone_data["Total_Crime"].apply(classify_zone)
+# Save the model for later use in the app
+joblib.dump(model, 'crime_zone_model.pkl')
 
-# Page title
-st.title("Crime Safety Zone Detector")
+# Streamlit App UI
+st.title("Crime Zone Detection Based on Your Location")
 
-# Get the user's geolocation
-user_location = get_user_location()
+# Hardcoded user location for demonstration
+user_lat = 28.666169  # Latitude
+user_lng = 77.302454  # Longitude
 
-if user_location:
-    st.write(f"Your Current Location: Latitude: {user_location[0]}, Longitude: {user_location[1]}")
+# Display user's location in latitude/longitude format
+st.write(f"Your current location (Latitude, Longitude): {user_lat}, {user_lng}")
 
-    # Calculate distances to all predefined zones
-    zone_data["Distance"] = zone_data.apply(
-        lambda row: geopy.distance.geodesic(user_location, (row["Latitude"], row["Longitude"])).kilometers, axis=1
-    )
+# Get a human-readable address using reverse geocoding
+reverse = geocoder.osm([user_lat, user_lng], method='reverse')
+user_address = reverse.address if reverse and reverse.address else "Address not found"
 
-    # Find the closest zone
-    closest_zone = zone_data.loc[zone_data["Distance"].idxmin()]
 
-    # Display results
-    st.write(f"Closest Zone: **{closest_zone['Area']}**")
-    st.write(f"Zone Type: **{closest_zone['Zone']}**")
-    st.write(f"Crime Count in the Zone: **{closest_zone['Total_Crime']}**")
+# Create a map centered around the user's location
+delhi_map = folium.Map(location=[user_lat, user_lng], zoom_start=11)
 
-    if closest_zone["Zone"] == "Red":
-        st.error("You are in an **UNSAFE (Red)** zone. Please take precautions.")
-    elif closest_zone["Zone"] == "Yellow":
-        st.warning("You are in a **Moderate Risk (Yellow)** zone. Stay alert.")
-    else:
-        st.success("You are in a **SAFE (Green)** zone.")
+# Add marker for the user's location
+folium.Marker(
+    location=[user_lat, user_lng],
+    popup="Your Current Location",
+    icon=folium.Icon(color="blue", icon="user", prefix="fa"),
+    draggable=False
+).add_to(delhi_map)
 
-    # Display map with the user's location and closest zone
-    crime_map = folium.Map(location=user_location, zoom_start=13)
+# Find the nearest data point based on latitude and longitude
+def find_nearest_zone(user_lat, user_lng, df):
+    min_distance = float('inf')
+    nearest_zone = ''
+    
+    for index, row in df.iterrows():
+        # Calculate the distance (using simple Euclidean distance for simplicity)
+        distance = ((row['Latitude'] - user_lat)**2 + (row['Longitude'] - user_lng)**2) ** 0.5
+        if distance < min_distance:
+            min_distance = distance
+            nearest_zone = row['Zone']
+            
+    return nearest_zone
 
-    # Add user's location
-    folium.Marker(user_location, popup="Your Location", icon=folium.Icon(color="blue")).add_to(crime_map)
+# Get the predicted zone based on the nearest point
+predicted_zone = find_nearest_zone(user_lat, user_lng, df)
 
-    # Add all predefined zones to the map
-    for _, row in zone_data.iterrows():
-        folium.Marker(
-            [row["Latitude"], row["Longitude"]],
-            popup=f"{row['Area']} ({row['Zone']}) - {row['Total_Crime']} Crimes",
-            icon=folium.Icon(color="red" if row["Zone"] == "Red" else
-                             "yellow" if row["Zone"] == "Yellow" else "green")
-        ).add_to(crime_map)
+# Display the result
+st.write(f"The zone based on your location is: **{predicted_zone}**")
 
-    # Show the map
-    st_folium(crime_map, width=700)
+# Add the heatmap to the map
+zone_intensity = {
+    'Red': 3,       # Higher intensity for Red zone
+    'Yellow': 2,    # Medium intensity for Yellow zone
+    'Green': 1      # Lower intensity for Green zone
+}
 
-# Note: To test locally, your browser must allow location access.
+heatmap_data = []
+
+# Add heatmap data based on the zone intensity
+for index, row in df.iterrows():
+    # Ensure both Latitude and Longitude are not NaN
+    if pd.notna(row['Latitude']) and pd.notna(row['Longitude']):
+        intensity = zone_intensity.get(row['Zone'], 1)  # Default to Green if zone not found
+        heatmap_data.append([row['Latitude'], row['Longitude'], intensity])
+
+# Check if heatmap data is empty or contains NaNs
+if len(heatmap_data) > 0:
+    HeatMap(heatmap_data).add_to(delhi_map)
+else:
+    st.write("No valid heatmap data available due to missing latitude/longitude values.")
+
+# Save and display the map
+delhi_map.save('delhi_crime_heatmap_user_location.html')
+st.write("Crime Zone Heatmap:")
+st.components.v1.html(open('delhi_crime_heatmap_user_location.html').read(), height=600)
+
