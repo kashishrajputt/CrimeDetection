@@ -46,8 +46,8 @@ joblib.dump(model, 'crime_zone_model.pkl')
 st.title("Crime Zone Detection Based on Your Location")
 
 # Hardcoded user location for demonstration
-user_lat = 28.666169  # Latitude
-user_lng = 77.302454  # Longitude
+user_lat = 28.6107595 # Latitude
+user_lng = 77.2207191  # Longitude
 
 # Display user's location in latitude/longitude format
 st.write(f"Your current location (Latitude, Longitude): {user_lat}, {user_lng}")
